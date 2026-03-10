@@ -1,6 +1,9 @@
 library(dplyr)
 library(data.table)
 library(ggplot2)
+source("cost_params.R")
+source("QALY.R")
+source("model_functions.R")
 
 output_dir <- "results/"
 load(paste0(output_dir, "runs.RData"))
@@ -168,4 +171,63 @@ p4 <- ggplot(diff_sum, aes(x = season, y = diff_m)) +
 
 ggsave(paste0(output_dir, "impact_plus2pct.png"), p4, width = 12, height = 10)
 
-message("Plots saved to ", output_dir)
+
+# ── 5. Cost difference table ──────────────────────────────────────────────────
+# Run calculate_costs for each season × scenario × run_type combination,
+# then compute per-sim differences (matched on sim ID) and summarise.
+
+var_labels <- c(
+  lost_qaly       = "QALY loss (QALYs)",
+  lost_value_qaly = "Value of QALY loss (BNOK)",
+  prod_loss       = "Productivity loss (BNOK)",
+  tot_loss        = "Total economic loss (BNOK)"
+)
+
+fmt <- function(med, lo, hi, digits = 3) {
+  sprintf("%s [%s, %s]",
+          formatC(med, digits = digits, format = "f"),
+          formatC(lo,  digits = digits, format = "f"),
+          formatC(hi,  digits = digits, format = "f"))
+}
+
+cost_rows <- list()
+for (s in unique(r$season)) {
+  for (rt in unique(r$run_type)) {
+    costs_base <- calculate_costs(r[season == s & name == "Baseline"    & run_type == rt])
+    costs_plus <- calculate_costs(r[season == s & name == "+2% in 60+" & run_type == rt])
+
+    # Per-sim costs (matched by strata = sim ID)
+    sim_base <- costs_base[aggregation == "sim", .(strata, variable, base  = value)]
+    sim_plus <- costs_plus[aggregation == "sim", .(strata, variable, plus  = value)]
+    sim_diff <- merge(sim_base, sim_plus, by = c("strata", "variable"))
+    sim_diff[, diff := base - plus]
+
+    summary <- sim_diff[, .(
+      base_m  = median(base),  base_l  = quantile(base, (1 - level) / 2),  base_h  = quantile(base, 1 - (1 - level) / 2),
+      plus_m  = median(plus),  plus_l  = quantile(plus, (1 - level) / 2),  plus_h  = quantile(plus, 1 - (1 - level) / 2),
+      diff_m  = median(diff),  diff_l  = quantile(diff, (1 - level) / 2),  diff_h  = quantile(diff, 1 - (1 - level) / 2)
+    ), by = variable]
+
+    summary[, `:=`(
+      season   = s,
+      run_type = rt,
+      outcome  = var_labels[as.character(variable)],
+      Baseline          = fmt(base_m, base_l, base_h),
+      `+2% in 60+`      = fmt(plus_m, plus_l, plus_h),
+      `Difference (averted)` = fmt(diff_m, diff_l, diff_h)
+    )]
+    cost_rows[[length(cost_rows) + 1]] <- summary
+  }
+}
+
+cost_table <- rbindlist(cost_rows)[
+  , .(season, run_type, outcome, Baseline, `+2% in 60+`, `Difference (averted)`)
+][order(season, run_type, outcome)]
+
+fwrite(cost_table, paste0(output_dir, "cost_differences.csv"))
+
+# Print to console
+cat("\n=== Cost differences: Baseline vs +2% vaccination in 60+ ===\n")
+print(cost_table, row.names = FALSE)
+
+message("Plots and table saved to ", output_dir)
