@@ -64,7 +64,11 @@ scenarios <- list(
   )
 )
 
+run_deterministic <- TRUE
+
 normal <- lapply(scenarios, function(x) {
-  run_scenarios(x, sims_per_best = 1, n_threads = 1, L = 239) %>% mutate(season = x$name)
+  run_scenarios(x, sims_per_best = 1, n_threads = 1, L = 239,
+                deterministic = run_deterministic) %>%
+    mutate(season = x$name)
 })
 save(normal, file = paste0(output_folder, "runs.RData"))

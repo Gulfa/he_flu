@@ -221,7 +221,7 @@ update_severity <- function(params, severity, change_icu_prob = 3.8, change_los_
 
 
 run_scenarios <- function(scenario, n = 300, n_threads = 4, n_best = 10, n_parts = 10,
-                          sims_per_best = 10, dt = 0.5, L = 219) {
+                          sims_per_best = 10, dt = 0.5, L = 219, deterministic = FALSE) {
   print(scenario$name)
 
   rr_hosp      <- seq(1, 0.8, -0.02)
@@ -254,8 +254,7 @@ run_scenarios <- function(scenario, n = 300, n_threads = 4, n_best = 10, n_parts
   scenario$vax_scenarios[[length(scenario$vax_scenarios) + 1]] <-
     list(name = "Baseline", vaccination_uptake = scenario$initial_vaccination)
 
-  runs <- list()
-  for (vax_scenario in scenario$vax_scenarios) {
+  run_vax_scenario <- function(vax_scenario, det) {
     i         <- 1
     initial_S <- matrix(0, nrow = 9, ncol = length(rr_hosp))
     initial_S[, 1]                    <- 1 - vax_scenario$vaccination_uptake
@@ -267,20 +266,28 @@ run_scenarios <- function(scenario, n = 300, n_threads = 4, n_best = 10, n_parts
       new_ps[[length(new_ps) + 1]] <- modifyList(ps, list(S_ini = S_ini, name = paste("run", i)))
       i <- i + 1
     }
-    r <- run_param_sets(
+    run_param_sets(
       new_ps,
-      L                   = L,
-      N_particles         = sims_per_best,
-      N_threads_internal  = sims_per_best,
+      L                  = L,
+      N_particles        = sims_per_best,
+      N_threads_internal = sims_per_best,
       n_threads,
-      silent              = FALSE
+      silent             = FALSE,
+      deterministic      = det
     ) %>%
       mutate(
-        sim  = paste(sim, name),
-        name = vax_scenario$name,
-        date = time + min(fread(scenario$data_file)$date)
+        sim      = paste(sim, name),
+        name     = vax_scenario$name,
+        date     = time + min(fread(scenario$data_file)$date),
+        run_type = if (det) "deterministic" else "stochastic"
       )
-    runs[[length(runs) + 1]] <- r
+  }
+
+  runs <- list()
+  for (vax_scenario in scenario$vax_scenarios) {
+    runs[[length(runs) + 1]] <- run_vax_scenario(vax_scenario, det = FALSE)
+    if (deterministic)
+      runs[[length(runs) + 1]] <- run_vax_scenario(vax_scenario, det = TRUE)
   }
 
   r <- rbindlist(runs) %>% filter(time %% 1 == 0)
@@ -379,7 +386,7 @@ calculate_costs <- function(r, t_ini = 65, asymp_frac = c(0.4, 0.4, 0.5, 0.5, 0.
 
 
 sub.vars <- c(
-  "name", "time", "sim", "date",
+  "name", "time", "sim", "date", "run_type",
   "tot_hosp_inc", "tot_infected", "tot_hosp", "tot_resp", "D",
   paste0("hosp_inc[", 1:9, "]"),
   paste0("tot_infected_age_", 1:9),
