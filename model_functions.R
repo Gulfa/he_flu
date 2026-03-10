@@ -1,3 +1,5 @@
+source("cost_params.R")
+
 library(dplyr)
 library(data.table)
 library(metapop)
@@ -58,6 +60,7 @@ get_params <- function(initial_S_dist,
   n_vac <- length(rr_hosp)
   n_strain <- 1
   N <- 9
+  first_date  <- as.Date(first_date)
   seasonality <- calc_seas(first_date, amount = seas, L = L)
   seasonality <- rep(seasonality, each = 1 / dt)
 
@@ -162,6 +165,7 @@ get_params <- function(initial_S_dist,
       tot_resp_ini     = array(0, dim = c(N, n_vac, n_strain)),
       tot_vac_ini      = array(0, dim = c(N, n_vac)),
       tot_vac_adm_ini  = array(0, dim = c(N, n_vac)),
+      S_div_vac        = S_ini,
       beta_norm        = age_groups,
       reg_pop_long     = age_groups,
       N_regions        = 1,
@@ -318,7 +322,9 @@ run_scenarios <- function(scenario, n = 300, n_threads = 4, n_best = 10, n_parts
 }
 
 
-calculate_costs <- function(r, t_ini = 65, asymp_frac = c(0.4, 0.4, 0.5, 0.5, 0.5, 0.5, 0.25, 0.25, 0.25)) {
+calculate_costs <- function(r,
+                           t_ini      = cost_params$t_ini,
+                           asymp_frac = cost_params$asymp_frac) {
   out_vars <- c(
     paste0("tot_infected_age_", 1:9),
     paste0("tot_hosp_age_", 1:9),
@@ -344,11 +350,12 @@ calculate_costs <- function(r, t_ini = 65, asymp_frac = c(0.4, 0.4, 0.5, 0.5, 0.
   c <- reshape2::dcast(b, sim + age_group ~ target)
   c <- c %>% mutate(cum_D = D_age, cum_I = tot_infected_age, cum_ICU = tot_resp_age, cum_H = tot_hosp_age)
 
-  qaly_loss      <- calc_qaly_inner(c, severity = 1)
+  qaly_loss      <- calc_qaly_inner(c, severity = cost_params$qaly_severity)
   qaly_loss$sim  <- c$sim
 
-  ld                   <- rep(c(2, 3, 3, 3, 4, 4, 4.5, 6, 6), 2)
-  loss_per_inc_illness <- (c(565 + 285, 0 + 570, 1500, 1500, 1500, 1500, 1500, 0, 0) + 285) * 1e-9 * ld
+  ld                   <- rep(cost_params$illness_days, 2)
+  loss_per_inc_illness <- (cost_params$daily_income_loss_by_age + cost_params$daily_overhead_nok) *
+                            cost_params$nok_to_bnok * ld
 
   prod_loss_by_age <- t(as.matrix(diff %>% select(starts_with("tot_infected_age")))) * (1 - asymp_frac) * loss_per_inc_illness
   prod_loss        <- colSums(prod_loss_by_age)
