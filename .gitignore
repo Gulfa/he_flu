@@ -1,0 +1,4 @@
+*.png
+parameter_files/.~lock.*
+parameter_files/*_proportion_in_protection_compartments_by_age_group.csv
+results/
