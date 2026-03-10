@@ -2,118 +2,170 @@ library(dplyr)
 library(data.table)
 library(ggplot2)
 
-results <- readRDS("min_results.RDS")
-results[, initial_conditions:=factor(initial_conditions, levels=c("low", "medium", "high"))]
-results[, waning:=factor(waning, levels=c("No waning", "Medium Waning", "Fast waning"))]
-results[, seasonality:=factor(seasonality, levels=c("No seasonality", "20% seasonality", "30% seasonality"))]
+output_dir <- "results/"
+load(paste0(output_dir, "runs.RData"))
+r <- rbindlist(normal)
+
+# Observed hospitalization data for each season
+obs <- rbindlist(list(
+  fread("nat_hosp_flu_2223.csv")[, season := "22/23 Season"],
+  fread("nat_hosp_flu_1718.csv")[, season := "17/18 Season"],
+  fread("nat_hosp_flu_1819.csv")[, season := "18/19 Season"]
+))
+obs[, date := as.Date(date)]
+
+level <- 0.95
+age_labels <- c("0-9", "10-19", "20-29", "30-39", "40-49", "50-59", "60-69", "70-79", "80+")
 
 
-data <- fread("https://raw.githubusercontent.com/folkehelseinstituttet/surveillance_data/master/covid19/data_covid19_hospital_by_time_latest.csv")
-hosp_inc <- data[location_code=="norge" & date >= as.Date("2022-10-01") & date < as.Date("2022-11-03")]
+# ── 1. Hospital incidence over time ──────────────────────────────────────────
+# Ribbon (stochastic) + line (deterministic) vs observed, by season and scenario
+
+sum_time <- r %>%
+  group_by(season, name, run_type, date) %>%
+  summarise(
+    hosp_inc_l = quantile(tot_hosp_inc, (1 - level) / 2),
+    hosp_inc_m = median(tot_hosp_inc),
+    hosp_inc_h = quantile(tot_hosp_inc, 1 - (1 - level) / 2),
+    .groups = "drop"
+  )
+
+p <- ggplot(sum_time %>% filter(run_type == "stochastic"),
+            aes(x = date, fill = name, colour = name)) +
+  geom_ribbon(aes(ymin = hosp_inc_l, ymax = hosp_inc_h), alpha = 0.25, colour = NA) +
+  geom_line(aes(y = hosp_inc_m), linewidth = 0.8)
+
+if ("deterministic" %in% unique(r$run_type)) {
+  p <- p + geom_line(
+    data = sum_time %>% filter(run_type == "deterministic"),
+    aes(y = hosp_inc_m), linetype = "dashed", linewidth = 0.8
+  )
+}
+
+p <- p +
+  geom_point(data = obs, aes(x = date, y = hosp), inherit.aes = FALSE,
+             colour = "black", size = 1, alpha = 0.6) +
+  facet_wrap(~season, scales = "free_x", ncol = 1) +
+  scale_fill_manual(values = c("Baseline" = "#3C78D8", "+2% in 60+" = "#E06C00")) +
+  scale_colour_manual(values = c("Baseline" = "#3C78D8", "+2% in 60+" = "#E06C00")) +
+  labs(x = NULL, y = "Daily hospital admissions",
+       fill = "Scenario", colour = "Scenario",
+       caption = "Ribbon: 95% CI (stochastic). Dashed: deterministic. Points: observed.") +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "top")
+
+ggsave(paste0(output_dir, "hosp_incidence_time.png"), p, width = 14, height = 12)
 
 
-level <- 0.975
+# ── 2. Age-specific hospital incidence at peak ────────────────────────────────
+# Total cumulative hospitalisations by age group, scenario, season
 
-sum_r_comb <- results %>% group_by(date) %>% summarise(hosp_inc_l=quantile(hosp_incidence, 1 - level),
-                                                       hosp_inc_h=quantile(hosp_incidence, level),
-                                                       inc_l=quantile(incidence, 1 - level),
-                                                       inc_h=quantile(incidence, level),
-                                                       hosp_l=quantile(hosp, 1 - level),
-                                                       hosp_h=quantile(hosp, level),
-                                                       resp_l=quantile(resp, 1 - level),
-                                                       resp_h=quantile(resp, level)
-                                                       )
+hosp_age_vars <- paste0("tot_hosp_age_", 1:9)
 
-ggplot(sum_r_comb) + geom_ribbon(aes(x=date, ymin=hosp_inc_l, ymax=hosp_inc_h), alpha=0.9, color="#393C61") + geom_point(aes(x=as.Date(date), y=n_hospital_main_cause), data=hosp_inc, color="red", size=4) + xlab("Time")  +ylab("Hospital Incidence") + theme_bw() + theme(text = element_text(size=34)) 
-ggsave("overall_hosp_inc.png", width=20, height = 10)
+cum_age <- r %>%
+  group_by(season, name, run_type, sim) %>%
+  slice_max(time) %>%
+  ungroup() %>%
+  select(season, name, run_type, sim, all_of(hosp_age_vars))
 
-       
-ggplot(sum_r_comb) + geom_ribbon(aes(x=date, ymin=inc_l, ymax=inc_h), alpha=0.9, color="#393C61")  + xlab("Time")  +ylab("Incidence") + theme_bw() + theme(text = element_text(size=30))
-ggsave("overall_inc.png", width=20, height = 10)
+cum_age_long <- cum_age %>%
+  tidyr::pivot_longer(all_of(hosp_age_vars), names_to = "age_var", values_to = "hosp") %>%
+  mutate(age_group = age_labels[as.integer(sub("tot_hosp_age_", "", age_var))])
 
-ggplot(sum_r_comb %>% filter(date > as.Date("2022-10-25"))) + geom_ribbon(aes(x=date, ymin=hosp_l, ymax=hosp_h), alpha=0.9, color="#393C61") + xlab("Time")  +ylab("Hospital Prevalence") + theme_bw() + theme(text = element_text(size=30))
-ggsave("overall_hosp.png", width=20, height = 10)
+cum_age_sum <- cum_age_long %>%
+  group_by(season, name, run_type, age_group) %>%
+  summarise(
+    hosp_l = quantile(hosp, (1 - level) / 2),
+    hosp_m = median(hosp),
+    hosp_h = quantile(hosp, 1 - (1 - level) / 2),
+    .groups = "drop"
+  ) %>%
+  mutate(age_group = factor(age_group, levels = age_labels))
 
-ggplot(sum_r_comb %>% filter(date > as.Date("2022-10-25"))) + geom_ribbon(aes(x=date, ymin=resp_l, ymax=resp_h), alpha=0.9, color="#393C61") + xlab("Time")  +ylab("Respiratory Prevalence") + theme_bw() + theme(text = element_text(size=30)) 
-ggsave("overall_resp.png", width=20, height = 10)
+p2 <- ggplot(cum_age_sum %>% filter(run_type == "stochastic"),
+             aes(x = age_group, y = hosp_m, fill = name)) +
+  geom_col(position = position_dodge(0.8), width = 0.7) +
+  geom_errorbar(aes(ymin = hosp_l, ymax = hosp_h),
+                position = position_dodge(0.8), width = 0.3) +
+  facet_wrap(~season, ncol = 1, scales = "free_y") +
+  scale_fill_manual(values = c("Baseline" = "#3C78D8", "+2% in 60+" = "#E06C00")) +
+  labs(x = "Age group", y = "Cumulative hospitalisations",
+       fill = "Scenario", caption = "Bars: median. Error bars: 95% CI.") +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "top")
 
-
-
-sum_r <- results %>% group_by(initial_conditions, waning, seasonality, date, severity) %>% summarise(hosp_inc_l=quantile(hosp_incidence, 1 - level),
-                                                                                          hosp_inc_h=quantile(hosp_incidence, level),
-                                                                                          inc_l=quantile(incidence, 1 - level),
-                                                                                          inc_h=quantile(incidence, level))
-                                                                                          
-
-ggplot(sum_r %>% filter(initial_conditions=="medium" & waning=="No waning" & severity=="Medium severity")) + geom_ribbon(aes(x=date, ymin=hosp_inc_l, ymax=hosp_inc_h), alpha=0.9) + geom_point(aes(x=as.Date(date), y=n_hospital_main_cause), data=hosp_inc, color="red", size=3) + xlab("Time")  +ylab("Hospital Incidence") + theme_bw() + theme(text = element_text(size=30)) + facet_wrap(.~seasonality)
-ggsave("seasonality.png", width=20, height = 10)
-
-
-
-ggplot(sum_r %>% filter(initial_conditions=="medium" & seasonality=="No seasonality" & severity=="Medium severity")) + geom_ribbon(aes(x=date, ymin=hosp_inc_l, ymax=hosp_inc_h), alpha=0.9) + geom_point(aes(x=as.Date(date), y=n_hospital_main_cause), data=hosp_inc, color="red", size=3) + facet_grid(.~waning) + xlab("Time")  +ylab("Hospital Incidence") + theme_bw() + theme(text = element_text(size=30))
-ggsave("waning.png", width=20, height = 10)
+ggsave(paste0(output_dir, "hosp_by_age.png"), p2, width = 12, height = 12)
 
 
-ggplot(sum_r %>% filter(waning == "Medium Waning" & seasonality=="20% seasonality" & severity=="Medium severity")) + geom_ribbon(aes(x=date, ymin=hosp_inc_l, ymax=hosp_inc_h), alpha=0.9) + geom_point(aes(x=as.Date(date), y=n_hospital_main_cause), data=hosp_inc, color="red", size=3) + facet_grid(.~initial_conditions) + xlab("Time")  +ylab("Hospital Incidence") + theme_bw() + theme(text = element_text(size=30))
-ggsave("initial_conds.png", width=20, height = 10)
+# ── 3. Cumulative outcomes summary ────────────────────────────────────────────
+# Total infections, hospitalisations, ICU, deaths by scenario and season
 
-sum_r$severity <- factor(sum_r$severity, levels=c("Low severity", "Medium severity", "High severity"))
-ggplot(sum_r %>% filter(waning == "Medium Waning" & seasonality=="20% seasonality" & initial_conditions=="medium")) + geom_ribbon(aes(x=date, ymin=hosp_inc_l, ymax=hosp_inc_h), alpha=0.9) + geom_point(aes(x=as.Date(date), y=n_hospital_main_cause), data=hosp_inc, color="red", size=3) + facet_grid(.~severity) + xlab("Time")  +ylab("Hospital Incidence") + theme_bw() + theme(text = element_text(size=30))
-ggsave("severity.png", width=20, height = 10)
+cum_overall <- r %>%
+  group_by(season, name, run_type, sim) %>%
+  slice_max(time) %>%
+  ungroup() %>%
+  select(season, name, run_type, sim, tot_infected, tot_hosp, tot_resp, D)
 
+cum_long <- cum_overall %>%
+  tidyr::pivot_longer(c(tot_infected, tot_hosp, tot_resp, D),
+                      names_to = "outcome", values_to = "value") %>%
+  mutate(outcome = recode(outcome,
+    tot_infected = "Infections",
+    tot_hosp     = "Hospitalisations",
+    tot_resp     = "ICU admissions",
+    D            = "Deaths"
+  )) %>%
+  mutate(outcome = factor(outcome,
+    levels = c("Infections", "Hospitalisations", "ICU admissions", "Deaths")))
 
-ggplot(sum_r %>% filter(initial_conditions=="medium")) + geom_ribbon(aes(x=date, ymin=hosp_inc_l, ymax=hosp_inc_h, fill=severity), alpha=0.9) + geom_point(aes(x=as.Date(date), y=n_hospital_main_cause), data=hosp_inc, color="red") + facet_grid(seasonality~waning) + xlab("Time")  +ylab("Hospital Incidence") + theme_bw() + theme(text = element_text(size=30))
-ggsave("scenarios.png")
+cum_sum <- cum_long %>%
+  group_by(season, name, run_type, outcome) %>%
+  summarise(
+    val_l = quantile(value, (1 - level) / 2),
+    val_m = median(value),
+    val_h = quantile(value, 1 - (1 - level) / 2),
+    .groups = "drop"
+  )
 
+p3 <- ggplot(cum_sum %>% filter(run_type == "stochastic"),
+             aes(x = season, y = val_m, fill = name)) +
+  geom_col(position = position_dodge(0.8), width = 0.7) +
+  geom_errorbar(aes(ymin = val_l, ymax = val_h),
+                position = position_dodge(0.8), width = 0.3) +
+  facet_wrap(~outcome, scales = "free_y", ncol = 2) +
+  scale_fill_manual(values = c("Baseline" = "#3C78D8", "+2% in 60+" = "#E06C00")) +
+  labs(x = NULL, y = "Cumulative count", fill = "Scenario",
+       caption = "Bars: median. Error bars: 95% CI.") +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "top", axis.text.x = element_text(angle = 20, hjust = 1))
 
-ggplot(sum_r %>% filter(seasonality=="20% seasonality")) + geom_ribbon(aes(x=date, ymin=hosp_inc_l, ymax=hosp_inc_h, fill=severity), alpha=0.7) + geom_point(aes(x=as.Date(date), y=n_hospital_main_cause), data=hosp_inc, color="red") + facet_grid(waning~initial_conditions) + xlab("Time")  +ylab("Hospital Incidence") + theme_bw() + theme(text = element_text(size=30))
-ggsave("scenarios_ic.png", width=20, height = 15)
-
-
-
-library(data.table)
-results <- readRDS("min_variant_results.RDS")
-results[, date:=time+ as.Date("2022-09-30")]
-
-results[, variant_severity_nice:="Same severity"]
-results[variant_severity == 2, variant_severity_nice:="Double severity"]
-results$variant_severity_nice <- factor(results$variant_severity_nice, levels=c("Same severity", "Double severity"))
-
-results[, variant_if_nice:="5% 1st Oct"]
-results[variant_initial_frac > 0.07 , variant_if_nice:="10% 1st Oct"]
-
-results$variant_if_nice <- factor(results$variant_if_nice, levels=c("5% 1st Oct", "10% 1st Oct"))
-
-
-
-sum_r <- results %>% group_by(date, variant_severity_nice, variant_beta, variant_rr,
-                              variant_if_nice) %>% summarise(hosp_inc_l=quantile(hosp_incidence, 1 - level),
-                                                                  hosp_inc_h=quantile(hosp_incidence, level),
-                                                                  hosp_inc_l_strain_1=quantile(hosp_incidence_strain_1, 1 - level),
-                                                                  hosp_inc_h_strain_1=quantile(hosp_incidence_strain_1, level),
-                                                                  hosp_inc_l_strain_2=quantile(hosp_incidence_strain_2, 1 - level),
-                                                                  hosp_inc_h_strain_2=quantile(hosp_incidence_strain_2, level),
-                                                                  inc_l=quantile(incidence, 1 - level),
-                                                                  inc_h=quantile(incidence, level),
-                                                                  inc_l_strain_1=quantile(incidence_strain_1, 1 - level),
-                                                                  inc_h_strain_1=quantile(incidence_strain_1, level),
-                                                                  inc_l_strain_2=quantile(incidence_strain_2, 1 - level),
-                                                                  inc_h_strain_2=quantile(incidence_strain_2, level))
+ggsave(paste0(output_dir, "cumulative_outcomes.png"), p3, width = 12, height = 10)
 
 
+# ── 4. Impact of +2% vaccination: absolute difference ─────────────────────────
+# (Baseline - +2% in 60+) median difference for each outcome and season
 
+diff_sum <- cum_sum %>%
+  filter(run_type == "stochastic") %>%
+  select(season, name, outcome, val_l, val_m, val_h) %>%
+  tidyr::pivot_wider(names_from = name,
+                     values_from = c(val_l, val_m, val_h)) %>%
+  mutate(
+    diff_m = `val_m_Baseline`              - `val_m_+2% in 60+`,
+    diff_l = `val_l_Baseline`              - `val_h_+2% in 60+`,
+    diff_h = `val_h_Baseline`              - `val_l_+2% in 60+`
+  )
 
+p4 <- ggplot(diff_sum, aes(x = season, y = diff_m)) +
+  geom_col(fill = "#2A9D8F", width = 0.6) +
+  geom_errorbar(aes(ymin = diff_l, ymax = diff_h), width = 0.25) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  facet_wrap(~outcome, scales = "free_y", ncol = 2) +
+  labs(x = NULL, y = "Cases averted (Baseline \u2212 +2% in 60+)",
+       caption = "Positive = cases averted by increased vaccination. Bars: median. Error bars: 95% CI.") +
+  theme_bw(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1))
 
-variant_hosp <- cbind(sum_r %>% select(date,  variant_severity_nice,variant_if_nice, variant_beta, variant_rr, hosp_inc_l_strain_1, hosp_inc_l_strain_2) %>% tidyr::pivot_longer(starts_with("hosp")) %>% mutate(value_lower=value),
-                      value_higher=sum_r %>% select(date,  variant_if_nice,variant_severity_nice, variant_beta, variant_rr, hosp_inc_h_strain_1, hosp_inc_h_strain_2) %>% tidyr::pivot_longer(starts_with("hosp")) %>% pull(value))
+ggsave(paste0(output_dir, "impact_plus2pct.png"), p4, width = 12, height = 10)
 
-variant_hosp <- variant_hosp %>%mutate(name=recode(name, hosp_inc_l_strain_1="Current variant", hosp_inc_l_strain_2="New variant"))
-
-ggplot(variant_hosp %>% filter(variant_beta == 1.2 & abs(variant_rr-0.05)< 0.01 )) + geom_ribbon(aes(x=date, ymin=value_lower, ymax=value_higher, fill=name)) + facet_grid(variant_severity_nice~variant_if_nice) + theme_bw() + theme(text = element_text(size=30))+labs(fill="Variant") + ylab("New hospitalisations") + xlab("Date") + ggtitle("More transmisible variant")
-ggsave("variant_more_trans.png", width=22, heigh=12)
-
-ggplot(variant_hosp %>% filter(variant_beta == 1.0 & abs(variant_rr-0.35)< 0.01 )) + geom_ribbon(aes(x=date, ymin=value_lower, ymax=value_higher, fill=name)) + facet_grid(variant_severity_nice~variant_if_nice) + theme_bw() + theme(text = element_text(size=30))+labs(fill="Variant") + ylab("New hospitalisations") + xlab("Date") + ggtitle("Imunity evading variant")
-ggsave("variant_im_ev.png", width=22, heigh=12)
-
-ggplot(variant_hosp %>% filter(variant_beta == 1.2 & abs(variant_rr-0.35)< 0.01 )) + geom_ribbon(aes(x=date, ymin=value_lower, ymax=value_higher, fill=name)) + facet_grid(variant_severity_nice~variant_if_nice) + theme_bw() + theme(text = element_text(size=30))+labs(fill="Variant") + ylab("New hospitalisations") + xlab("Date") + ggtitle("More transmisible and immunity evading variant")
-ggsave("variant_more_trans_im_ev.png", width=22, heigh=12)
+message("Plots saved to ", output_dir)
